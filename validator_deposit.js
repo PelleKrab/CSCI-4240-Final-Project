@@ -28,7 +28,7 @@ async function main() {
   const signature = "0x854bc9625f2567582785aa8792df8e601a649aba5223436cacb2d917e25f43f18ec414352cd7a75a947d07f7f77de9ba059fc4686226885ee49bf1647369199db629a6eeca50ee4c283be42da35b85bdacefc6d3567a1e719ffb2fd06adeda00";
   const deposit_data_root = "0x4f8700f759d1b542143d92ea25f7ac809f7a976511340c999d6f804bd37fc748";
 
-  const depositValue = ethers.parseUnits("34", "ether");
+  const depositValue = ethers.parseUnits("32", "ether");
 
   const txRequest = await depositContract.deposit.populateTransaction(
     pubkey,
