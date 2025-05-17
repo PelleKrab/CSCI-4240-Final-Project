@@ -6,6 +6,27 @@ import dotenv from "dotenv";
 async function main() {
   dotenv.config();
 
+  const axios = require("axios");
+  const agg = {};
+  const relays = [
+    { name: "hoodi.flashbots", url: `https://boost-relay-hoodi.flashbots.net/relay/v1/data/bidtraces/proposer_payload_delivered?slot=${agg["slot"]}` },
+    { name: "hoodi.aestus", url: `https://hoodi.aestus.live/relay/v1/data/bidtraces/proposer_payload_delivered?slot=${agg["slot"]}` },
+    { name: "hoodi.titanrelay", url: `https://hoodi.titanrelay.xyz/relay/v1/data/bidtraces/proposer_payload_delivered?slot=${agg["slot"]}` },
+    { name: "bloxroute.hoodi", url: `https://bloxroute.hoodi.blxrbdn.com/relay/v1/data/bidtraces/proposer_payload_delivered?slot=${agg["slot"]}` }
+  ];
+
+  for (const relay of relays) {
+    try {
+      const response = await axios.get(relay.url);
+      if (response.status === 200) {
+        agg["relay"] = relay.name;
+        console.log(`Relay ${relay.name} responded successfully.`);
+      }
+    } catch (error) {
+      console.error(`Error checking relay ${relay.name}:`, error.message);
+    }
+  }
+
   const privateKey = process.env.PRIVATE_KEY;
 
   if (!privateKey) {

@@ -23,15 +23,17 @@ import argparse
 import csv
 import re
 from collections import defaultdict
+import requests
 from datetime import datetime, timedelta
 from statistics import mean
 from pathlib import Path
+import json
 
 
 # --------------------------------------------------------------------------- #
 #  Core parser/aggregator                                                     #
 # --------------------------------------------------------------------------- #
-def parse_window_and_aggregate(log_files, target_timestamp, window_secs=15):
+def parse_window_and_aggregate(log_files, target_timestamp, window_secs=15, slot=0):
     """
     Return ONE aggregated dict for all lines within ±window_secs of
     target_timestamp (string in “%b-%d-%Y %I:%M:%S %p”, e.g. “Apr-23-2025 07:25:25 PM”).
@@ -42,6 +44,36 @@ def parse_window_and_aggregate(log_files, target_timestamp, window_secs=15):
     end_dt    = target_dt + timedelta(seconds=window_secs)
 
     # ---- helpers ----------------------------------------------------------- #
+
+    # Relay checking functionality
+    def check_relays(slot):
+        relay_name = ""
+        relays = [
+            {"name": "hoodi.flashbots", "url": f"https://boost-relay-hoodi.flashbots.net/relay/v1/data/bidtraces/proposer_payload_delivered?slot={slot}"},
+            {"name": "hoodi.aestus", "url": f"https://hoodi.aestus.live/relay/v1/data/bidtraces/proposer_payload_delivered?slot={slot}"},
+            {"name": "hoodi.titanrelay", "url": f"https://hoodi.titanrelay.xyz/relay/v1/data/bidtraces/proposer_payload_delivered?slot={slot}"},
+            {"name": "bloxroute.hoodi", "url": f"https://bloxroute.hoodi.blxrbdn.com/relay/v1/data/bidtraces/proposer_payload_delivered?slot={slot}"}
+        ]
+
+        for relay in relays:
+            try:
+                response = requests.get(relay["url"])
+                if response.status_code == 200:
+                    try:
+                        data = response.json()  # Parse the response as JSON
+                        if isinstance(data, list) and data:  # Check if it's a non-empty list
+                            relay_name = relay["name"]
+                            print(f"Relay {relay['name']} responded successfully with valid data.")
+                        else:
+                            print(f"Relay {relay['name']} responded successfully but the response is empty or invalid.")
+                    except json.JSONDecodeError:
+                        print(f"Relay {relay['name']} responded successfully but the response is not valid JSON.")
+                else:
+                    print(f"Relay {relay['name']} responded with status code {response.status_code}.")
+            except Exception as e:
+                print(f"Error checking relay {relay['name']}: {e}")
+        return relay_name
+        
     ts_pat   = re.compile(r"^(?P<ts>\w{3} \d{2} \d{2}:\d{2}:\d{2})")
     num_pat  = lambda k: re.compile(fr"{k}: (\d+)")
     hash_pat = lambda k: re.compile(fr"{k}: (0x[0-9a-fA-F]+)")
@@ -50,7 +82,21 @@ def parse_window_and_aggregate(log_files, target_timestamp, window_secs=15):
     sums, counts = defaultdict(int), defaultdict(int)     # for averages
     local_max    = 0
 
-    agg = {"final_status": "not_included"}                # default
+    agg = {
+        "slot": "",
+        "request_ts": "",
+        "parent_hash": "",
+        "block_root": "",
+        "local_block_hash": "",
+        "relay_block_hash": "",
+        "final_status": "not_included",  # default
+        "local_response_ms": "",
+        "relay_response_ms": "",
+        "relay_reveal_ms": "",
+        "broadcast_delay_ms": "",
+        "relay_success": "F",
+        "relay": ""
+    }
 
     # ---- scan files -------------------------------------------------------- #
     for lf in log_files:
@@ -67,6 +113,12 @@ def parse_window_and_aggregate(log_files, target_timestamp, window_secs=15):
                 )
                 if not (start_dt <= log_dt <= end_dt):
                     continue
+
+                # -------- Broadcast delay --------------------------------- #
+                elif "Block broadcast was delayed" in line:
+                    if (m := num_pat("delay_ms").search(line)):
+                        sums["broadcast_delay_ms"]  += int(m.group(1))
+                        counts["broadcast_delay_ms"] += 1
 
                 # -------- Requested blinded execution payload ------------- #
                 if "Requested blinded execution payload" in line:
@@ -87,7 +139,7 @@ def parse_window_and_aggregate(log_files, target_timestamp, window_secs=15):
                         agg.setdefault("local_block_hash", m.group(1))
                     if (m := hash_pat("relay_block_hash").search(line)):
                         agg.setdefault("relay_block_hash", m.group(1))
-
+                        
                 # -------- Builder successfully revealed payload ----------- #
                 elif "Builder successfully revealed payload" in line:
                     if (m := hash_pat("block_root").search(line)):
@@ -95,19 +147,11 @@ def parse_window_and_aggregate(log_files, target_timestamp, window_secs=15):
                     if (m := num_pat("relay_response_ms").search(line)):
                         sums["relay_reveal_ms"]  += int(m.group(1))
                         counts["relay_reveal_ms"] += 1
-
-                # -------- Broadcast delay --------------------------------- #
-                elif "Block broadcast was delayed" in line:
-                    if (m := num_pat("delay_ms").search(line)):
-                        sums["broadcast_delay_ms"]  += int(m.group(1))
-                        counts["broadcast_delay_ms"] += 1
-                    if (m := num_pat("slot").search(line)):
-                        agg.setdefault("slot", m.group(1))
+                        agg["relay_success"] = "T"
+                        agg["relay"] = check_relays(slot)
 
                 # -------- Signed block received in HTTP API -------------- #
                 elif "Signed block received in HTTP API" in line:
-                    if (m := num_pat("slot").search(line)):
-                        agg["final_slot"] = m.group(1)
                     agg["final_status"] = "included"
 
     # ---- finalise numeric aggregations ------------------------------------ #
@@ -115,6 +159,7 @@ def parse_window_and_aggregate(log_files, target_timestamp, window_secs=15):
         if counts[fld]:
             agg[fld] = str(round(sums[fld] / counts[fld], 2))
     agg["local_response_ms"] = str(local_max)
+    agg["slot"]=str(slot)
 
     return agg
 
@@ -131,6 +176,9 @@ def main():
         help='Target timestamp, e.g. "Apr-23-2025 07:25:25 PM" (in node local time)',
     )
     parser.add_argument("output_csv", help="Output CSV file path")
+    
+    parser.add_argument("slot", help="Slot number")
+    
     parser.add_argument(
         "--window",
         type=int,
@@ -161,24 +209,25 @@ def main():
 
     log_files = args.logs if args.logs else default_logs
 
-    agg = parse_window_and_aggregate(log_files, args.timestamp, args.window)
+    agg = parse_window_and_aggregate(log_files, args.timestamp, args.window, args.slot)
     if not agg:
         print("No matching lines found in the requested window.")
         return
 
     headers = [
+        "slot",
         "request_ts",
         "parent_hash",
         "block_root",
         "local_block_hash",
         "relay_block_hash",
-        "slot",
-        "final_slot",
         "final_status",
         "local_response_ms",
         "relay_response_ms",
         "relay_reveal_ms",
         "broadcast_delay_ms",
+        "relay_success",
+        "relay",
     ]
     headers = [h for h in headers if h in agg]  # drop cols we didn't find
 
